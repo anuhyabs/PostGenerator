@@ -1,0 +1,145 @@
+schema_version: 1
+category: General
+tags:
+  - linkedin
+  - slack
+  - social
+  - announcement
+title: LinkedIn Post + Slack Announcement
+description: Publish a LinkedIn post with an uploaded video on your behalf from 
+  a short description and a video file, then share the link to the new post in a
+  Slack channel with a message you describe.
+icon: sparkles
+accent_color: '#0a66c2'
+example: Post about our v2.0 launch on LinkedIn, then tell #marketing in a friendly note that it is live and ask the team to like and share.
+required_inputs:
+  - LinkedIn post description
+  - Slack message description
+  - Slack channel
+  - Video
+steps:
+  - Draft the LinkedIn post and the Slack message
+  - Verify the Slack channel and connectors
+  - Upload the video to LinkedIn
+  - Publish the post on LinkedIn and capture its link
+  - Post the Slack message with the LinkedIn link
+final_output: The new LinkedIn post URL and the Slack message posted to your 
+  channel
+fields:
+  - key: linkedin_post_description
+    label: LinkedIn post description
+    type: textarea
+    required: true
+    description: What the LinkedIn post should say - topic, key points, tone, 
+      hashtags.
+    placeholder: Announce our v2.0 launch - faster dashboards, new integrations 
+      - in an excited but professional tone
+  - key: slack_message_description
+    label: Slack message description
+    type: textarea
+    required: true
+    description: What the Slack message should say. The link to the new LinkedIn
+      post is added automatically.
+    placeholder: Tell the team our launch post is live and ask them to like and 
+      share it
+  - key: slack_channel
+    label: Slack channel
+    type: text
+    required: true
+    description: The Slack channel to post the message in.
+    placeholder: '#marketing'
+  - key: video_file
+    label: Video
+    type: document
+    required: true
+    description: The video file from your room's resources to publish together 
+      with the LinkedIn post (MP4 recommended, up to 30 minutes). The post is 
+      never published without it.
+plan:
+  - id: draft_content
+    label: Draft the LinkedIn post and the Slack message
+    produces:
+      - content.drafts
+    details: Turns the two descriptions into the final LinkedIn post text and a 
+      Slack message with a placeholder where the LinkedIn link goes. Nothing is 
+      posted yet.
+    tools:
+      - reasoning
+  - id: verify_slack_channel
+    label: Verify the Slack channel and connectors
+    produces:
+      - slack.channel_id
+    details: Confirms the LinkedIn and Slack connectors are connected and 
+      resolves the channel you named to its Slack ID, so nothing is published on
+      LinkedIn if the Slack target is invalid.
+    tools:
+      - list_vault_apis
+      - execute_python
+  - id: upload_linkedin_video
+    label: Upload the video to LinkedIn
+    depends_on:
+      - verify_slack_channel
+    produces:
+      - linkedin.video_urn
+    details: Uploads the required video to LinkedIn in parts, finalizes it and 
+      waits until LinkedIn has finished processing it. Nothing is published yet;
+      if the upload fails, the run stops before any post goes out.
+    tools:
+      - execute_python
+      - LinkedIn API
+  - id: post_linkedin
+    label: Publish the post on LinkedIn and capture its link
+    depends_on:
+      - draft_content
+      - verify_slack_channel
+      - upload_linkedin_video
+    produces:
+      - linkedin.post_url
+    details: Posts publicly to LinkedIn as the connected user, exactly once, 
+      together with the uploaded video (never text-only), and builds the URL of 
+      the new post from the returned post URN.
+    tools:
+      - execute_python
+      - LinkedIn API
+  - id: post_slack
+    label: Post the Slack message with the LinkedIn link
+    depends_on:
+      - post_linkedin
+    produces:
+      - slack.message_posted
+    details: Inserts the LinkedIn post URL into the Slack message and posts it 
+      to the chosen channel, then reports both links and what was posted.
+    tools:
+      - execute_python
+      - Slack API
+required_outputs:
+  - content.drafts
+  - slack.channel_id
+  - linkedin.video_urn
+  - linkedin.post_url
+  - slack.message_posted
+connector_requirements:
+  - id: linkedin
+    label: LinkedIn
+    origin_includes: linkedin
+    reason: Needed to publish the post on your behalf (w_member_social).
+  - id: slack
+    label: Slack
+    origin_includes: slack
+    reason: Needed to look up the channel and post the message with the LinkedIn
+      link.
+message_template: |-
+  Publish a LinkedIn post and share it in Slack.
+
+  LinkedIn post — {{linkedin_post_description}}
+
+  Slack message — {{slack_message_description}}
+
+  Slack channel — {{slack_channel}}
+
+  Video — {{video_file}}
+github:
+  owner: anuhyabs
+  repo: PostGenerator
+  branch: main
+  path: playbooks/custom-playbook-260p255y
