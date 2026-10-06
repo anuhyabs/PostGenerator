@@ -52,11 +52,29 @@ Before finishing, confirm each of these exists, and name any that does not and w
 - `linkedin.post_url` — the URL of the newly published LinkedIn post, which includes the video.
 - `slack.message_posted` — the Slack message (including the LinkedIn URL) was posted; report channel and message timestamp.
 
+## Failure handling — alert #production-issues (only on failure)
+
+If any stage fails and the run's deliverables are not completed (a connector is missing, the Slack channel cannot be resolved, the video upload or processing fails, LinkedIn rejects the post, the Slack post fails, or any unexpected error), post one alert to the Slack channel `#production-issues`. **When every required output was produced, never post to this channel.** A run that succeeds must not touch it.
+
+Do this before reporting the stage `failed`, because `failed` ends the run:
+
+1. Resolve `#production-issues` to its channel ID with `conversations.list` (same method as `verify_slack_channel`; match the name `production-issues` exactly). Use the Slack connector from `list_vault_apis`. Do not fall back to another channel. If the channel cannot be found, or Slack itself is the thing that failed and no alert can be posted, say so plainly in your final reply and still report the stage `failed`.
+2. Post one message with `chat.postMessage` (JSON `channel`, `text`) in Slack mrkdwn, containing:
+   - `:rotating_light: *LinkedIn Post + Slack Announcement* failed`
+   - the *failed stage* (its plan id and label)
+   - the *error message*: the exact error or API response summary. Include the HTTP status and Slack/LinkedIn error code. Truncate it to about 1,500 characters. Never include tokens, authorization headers, or other secrets.
+   - *what was completed before the failure*, so nobody duplicates work: for example the LinkedIn post URL if the post was already published, the uploaded video URN, or the Slack channel that was resolved. Say explicitly if the LinkedIn post is already live.
+   - the *link to the room and run*: the playbook page `https://app.corvic.live/room/<room_id>/playbook/custom-playbook-260p255y`, plus the run's chat thread id. Take the room id and thread id from the `current_url` in `get_environment` (`client_contextual_info`) when present. Otherwise take them from this thread's `sys/created-by/org:...:room:<room_id>:agent:<agent_id>:chatThread:<thread_id>` trait. Never invent an id.
+3. Post the alert at most once per run. Do not retry it if it fails; report that in the final reply.
+4. Then call `report_playbook_progress(step_id="<failed stage id>", status="failed", note="<short user-safe reason>")`.
+
+A LinkedIn post that already went live is never re-posted as part of failure handling. If only the Slack announcement failed, the alert reports the LinkedIn URL so the announcement can be sent by hand.
+
 ## How this Playbook runs
 
 Immediately before each stage, call `use_skill(skill_name="custom-playbook-260p255y", step_id="<id>")` to load that stage's instructions, using the plan ids: `draft_content`, `verify_slack_channel`, `upload_linkedin_video`, `post_linkedin`, `post_slack`. Loading a stage marks it started and loading the next marks the previous one complete, so do not emit `report_playbook_progress` for `started` or `done` on intermediate stages. Call `report_playbook_progress` only (a) with `status="failed"` and a short user-safe `note` when a stage cannot complete, which ends the run, and (b) with `status="done"` once for the final stage `post_slack`, after the Slack message has actually been posted. `draft_content`, `verify_slack_channel` and (after the channel check) `upload_linkedin_video` are independent of the drafting and may run in parallel.
 
-Drive the run through every stage to the end of the contract in one go. Do not pause to ask whether to continue, request permission, or post progress check-ins; the only early exit is a hard, unrecoverable error reported as `failed`.
+Drive the run through every stage to the end of the contract in one go. Do not pause to ask whether to continue, request permission, or post progress check-ins; the only early exit is a hard, unrecoverable error, handled as described in **Failure handling** (alert `#production-issues`, then report `failed`). Everywhere a stage below says to fail or stop, that means: run the Failure handling steps first.
 
 ## Step: draft_content — Draft the LinkedIn post and the Slack message
 
@@ -84,7 +102,7 @@ Produces `slack.channel_id`. Runs in parallel with `draft_content`.
 Produces `linkedin.video_urn`. Depends on `verify_slack_channel`. The video is mandatory. If the `video_file` input is empty or the file cannot be found, fail the run with a clear note (`report_playbook_progress(status="failed")`); never continue to a text-only post. In an interactive run, if the video is missing, ask the user once for it before the stages start.
 
 1. Locate the file among the room's resources (`fetch_feature_view` on the resource/source listing, matching the path or name). Stage it with `extract_tables` if needed so it is a file table (`{path, content, mime_type}`), and pass that table as `input_table_ids` to `execute_python` (read it from `$CORVIC_INPUT_TABLES`, then `requests.get(url)` + `pl.read_parquet`). The room's source listing only holds file metadata (`name`, `source_path`, `size`, `mime_type`), so run `extract_tables` on that resource first to get the file bytes as `{path, content, mime_type}`, then filter to the chosen file. Confirm it is a video (mime type `video/*`). LinkedIn's video API officially accepts MP4 only: if the file is not MP4 (for example `video/quicktime` / `.mov`, as screen recordings usually are), check whether `ffmpeg` is available in the sandbox (`subprocess`, `ffmpeg -version`) and, if so, convert it to H.264/AAC MP4 (`ffmpeg -i in.mov -c:v libx264 -preset veryfast -crf 23 -c:a aac -movflags +faststart out.mp4`, writing under `/tmp`, which counts against the 4 Gi budget) and upload the converted file, using its size for `fileSizeBytes`. If `ffmpeg` is not available, upload the original bytes as-is and rely on the `AVAILABLE` check below; if LinkedIn then reports `PROCESSING_FAILED`, fail the run with a note that the video needs to be re-uploaded as MP4. LinkedIn accepts video of about 3 seconds to 30 minutes and up to 5 GB; if it is clearly outside that or not a video, fail with a clear note rather than posting without it. Keep the whole file within the sandbox's 4 Gi memory budget.
-2. Use `execute_python` with the LinkedIn `vault_api_ids`. Get the member id with `GET https://api.linkedin.com/v2/userinfo` (`sub`); owner is `urn:li:person:<sub>`. Use headers `LinkedIn-Version: 202405` (or a newer active `YYYYMM`) and `X-Restli-Protocol-Version: 2.0.0`.
+2. Use `execute_python` with the LinkedIn `vault_api_ids`. Get the member id with `GET https://api.linkedin.com/v2/userinfo` (`sub`); owner is `urn:li:person:<sub>`. Use headers `LinkedIn-Version: 202609` (LinkedIn retires old versions; if the API answers 426 `NONEXISTENT_VERSION`, retry with the previous `YYYYMM`, e.g. 202608, 202607, …) and `X-Restli-Protocol-Version: 2.0.0`.
 3. Initialize: `POST https://api.linkedin.com/rest/videos?action=initializeUpload` with body `{"initializeUploadRequest": {"owner": "urn:li:person:<sub>", "fileSizeBytes": <size>, "uploadCaptions": false, "uploadThumbnail": false}}`. The response `value` holds `video` (the video URN, `urn:li:video:...`), `uploadToken`, and `uploadInstructions` (a list of `{firstByte, lastByte, uploadUrl}` parts).
 4. Upload each part: `PUT` the bytes `[firstByte, lastByte]` to its `uploadUrl` with `Content-Type: application/octet-stream` (do not add the LinkedIn auth header to the upload URL if the request fails with it; those URLs are pre-signed). Collect the `ETag` response header of every part, in order, using generous timeouts and up to 3 retries per part (retrying a part is safe).
 5. Finalize: `POST https://api.linkedin.com/rest/videos?action=finalizeUpload` with `{"finalizeUploadRequest": {"video": "<video urn>", "uploadToken": "<uploadToken>", "uploadedPartIds": [<etags in order>]}}`.
@@ -97,7 +115,7 @@ Produces `linkedin.post_url`. Depends on `draft_content`, `verify_slack_channel`
 Use `execute_python` with the LinkedIn `vault_api_ids`:
 
 1. Get the member id: `GET https://api.linkedin.com/v2/userinfo`; the `sub` field is the member id. The author is `urn:li:person:<sub>`.
-2. Publish with `POST https://api.linkedin.com/rest/posts` and headers `Content-Type: application/json`, `LinkedIn-Version: 202405` (use a recent `YYYYMM` version; if the API says the version is not active, try the next newer one), and `X-Restli-Protocol-Version: 2.0.0`. Body:
+2. Publish with `POST https://api.linkedin.com/rest/posts` and headers `Content-Type: application/json`, `LinkedIn-Version: 202609` (LinkedIn retires old versions; if the API answers 426 `NONEXISTENT_VERSION`, nothing was posted, so retry with the previous `YYYYMM`, e.g. 202608, 202607, …), and `X-Restli-Protocol-Version: 2.0.0`. Body:
    ```json
    {
      "author": "urn:li:person:<sub>",
